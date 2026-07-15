@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type Page = "today" | "inbox" | "library" | "review" | "profile";
 type Item = {
@@ -15,9 +15,11 @@ type Item = {
   color: string;
   glyph: string;
   project?: string;
+  status?: string;
+  processingStatus?: string;
 };
 
-const items: Item[] = [
+const demoItems: Item[] = [
   { id: 1, title: "异步预取设计", source: "项目笔记", kind: "笔记", time: "2 小时前", summary: "记录了在 OS 大赛中实现异步预取的思路与细节，包括 KV Cache 的分层管理与预取时机策略。", reason: "用于完善 KV Cache 异步预取方案", tags: ["系统优化", "KV Cache", "代码"], color: "sage", glyph: "芯", project: "OS 大赛" },
   { id: 2, title: "低美术成本的游戏机制", source: "B站视频", kind: "视频", time: "昨天", summary: "通过机制驱动体验的八个设计方向，减少美术资源依赖，同时保持原型的视觉辨识度。", reason: "为 Game Jam 寻找轻量玩法参考", tags: ["游戏设计", "灵感"], color: "amber", glyph: "玩", project: "GMTK Game Jam" },
   { id: 3, title: "个人知识库的收集闭环", source: "网页文章", kind: "文章", time: "3 天前", summary: "从收集、处理、关联到回顾，讨论如何建立可持续的个人知识系统。", reason: "拾迹产品架构参考", tags: ["知识管理", "产品"], color: "sage", glyph: "环", project: "拾迹" },
@@ -74,16 +76,35 @@ export default function Home() {
   const [composer, setComposer] = useState(false);
   const [filter, setFilter] = useState("全部");
   const [toast, setToast] = useState("");
+  const [records, setRecords] = useState<Item[]>(demoItems);
+  const [loading, setLoading] = useState(true);
 
-  const filtered = useMemo(() => items.filter(i => {
+  useEffect(() => {
+    let active = true;
+    fetch("/api/items")
+      .then(response => response.ok ? response.json() : Promise.reject(new Error("读取失败")))
+      .then((data: { items?: Item[] }) => { if (active && data.items?.length) setRecords(data.items); })
+      .catch(() => setToast("暂时无法连接数据服务，正在显示本地示例"))
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  const filtered = useMemo(() => records.filter(i => {
     const text = `${i.title}${i.source}${i.summary}${i.reason}${i.tags.join("")}`.toLowerCase();
     return text.includes(query.toLowerCase()) && (filter === "全部" || i.kind === filter || i.tags.includes(filter));
-  }), [query, filter]);
+  }), [query, filter, records]);
 
-  function saveNote(e?: FormEvent) {
+  async function saveNote(e?: FormEvent) {
     e?.preventDefault();
     if (!note.trim()) { setToast("先写下一点什么"); return; }
-    setSaved(true); setToast(`${noteMode}已放入收件箱`); setNote(""); setComposer(false);
+    const content = note.trim();
+    try {
+      const response = await fetch("/api/items", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content, kind: noteMode }) });
+      if (!response.ok) throw new Error("保存失败");
+      const data = await response.json() as { item: Item };
+      setRecords(current => [data.item, ...current]);
+      setSaved(true); setToast(`${noteMode}已放入收件箱`); setNote(""); setComposer(false);
+    } catch { setToast("保存失败，请稍后重试"); }
     setTimeout(() => setSaved(false), 1800); setTimeout(() => setToast(""), 2400);
   }
 
@@ -115,9 +136,9 @@ export default function Home() {
         </form>
         <div className="today-grid">
           <section><div className="section-title"><div><span className="eyebrow"><Icon name="spark" size={15}/>AI 为你回顾</span><h2>过去的线索，今天可能有用</h2></div><button onClick={() => setPage("review")}>换一组</button></div>
-            <div className="review-stack">{items.slice(0,3).map(item => <button className="review-card" key={item.id} onClick={() => setSelected(item)}><span className={`source-icon large ${item.color}`}>{item.glyph}</span><span><b>{item.title}</b><small>{item.project && <em>● {item.project}</em>}{item.summary}</small><i>{item.time}</i></span><Icon name="arrow" size={17}/></button>)}</div>
+            <div className="review-stack">{records.slice(0,3).map(item => <button className="review-card" key={item.id} onClick={() => setSelected(item)}><span className={`source-icon large ${item.color}`}>{item.glyph}</span><span><b>{item.title}</b><small>{item.project && <em>● {item.project}</em>}{item.summary}</small><i>{item.time}</i></span><Icon name="arrow" size={17}/></button>)}</div>
           </section>
-          <section><div className="section-title"><div><span className="eyebrow">最近收件箱</span><h2>等待理解的 7 条内容</h2></div><button onClick={() => setPage("inbox")}>查看全部</button></div><div className="inbox-list">{items.slice(3,7).map(i => <ItemRow key={i.id} item={i} onOpen={setSelected}/>)}</div></section>
+          <section><div className="section-title"><div><span className="eyebrow">最近收件箱</span><h2>{loading ? "正在读取…" : `等待理解的 ${records.length} 条内容`}</h2></div><button onClick={() => setPage("inbox")}>查看全部</button></div><div className="inbox-list">{records.slice(0,4).map(i => <ItemRow key={i.id} item={i} onOpen={setSelected}/>)}</div></section>
         </div>
       </section>}
 
@@ -125,7 +146,7 @@ export default function Home() {
 
       {page === "library" && <section className="page-content"><div className="library-hero"><div><span className="eyebrow"><Icon name="spark" size={15}/>自动整理完成</span><h2>你的知识正在形成结构</h2><p>拾迹已从 128 条内容中识别出 16 个主题、5 个项目与 34 条关联。</p></div><div className="stats"><span><b>128</b>记忆条目</span><span><b>16</b>活跃主题</span><span><b>34</b>内容关联</span></div></div><div className="topic-grid">{[["系统与推理优化","24 条","#7e8e78"],["产品与交互设计","19 条","#b86f52"],["游戏创意","14 条","#c6a267"],["个人成长","11 条","#7d8da4"]].map(([t,n,c]) => <button className="topic-card" key={t} style={{"--topic":c} as React.CSSProperties}><i/><span><b>{t}</b><small>{n} · 最近更新于昨天</small></span><Icon name="arrow" size={18}/></button>)}</div><div className="section-title library-title"><div><span className="eyebrow">最近使用</span><h2>与你当前项目相关</h2></div></div><div className="panel">{filtered.slice(0,5).map(i => <ItemRow key={i.id} item={i} onOpen={setSelected}/>)}</div></section>}
 
-      {page === "review" && <section className="page-content"><div className="review-hero"><span className="review-orbit"><i/><i/><b>3</b></span><div><span className="eyebrow"><Icon name="spark" size={15}/>今日回顾</span><h2>三条记忆，重新连接今天</h2><p>一条最近收藏、一条长期未读、一条与你当前项目有关。</p></div><button onClick={() => setToast("已生成新一组回顾")}>开始回顾</button></div><div className="review-columns">{items.slice(0,3).map((i,index) => <article key={i.id}><span>0{index+1} · {index === 0 ? "最近收藏" : index === 1 ? "长期未读" : "项目相关"}</span><div className={`source-icon large ${i.color}`}>{i.glyph}</div><h3>{i.title}</h3><p>{i.summary}</p><div>{i.tags.map(t => <em key={t}>#{t}</em>)}</div><button onClick={() => setSelected(i)}>查看记忆 <Icon name="arrow" size={16}/></button></article>)}</div></section>}
+      {page === "review" && <section className="page-content"><div className="review-hero"><span className="review-orbit"><i/><i/><b>3</b></span><div><span className="eyebrow"><Icon name="spark" size={15}/>今日回顾</span><h2>三条记忆，重新连接今天</h2><p>一条最近收藏、一条长期未读、一条与你当前项目有关。</p></div><button onClick={() => setToast("已生成新一组回顾")}>开始回顾</button></div><div className="review-columns">{records.slice(0,3).map((i,index) => <article key={i.id}><span>0{index+1} · {index === 0 ? "最近收藏" : index === 1 ? "长期未读" : "项目相关"}</span><div className={`source-icon large ${i.color}`}>{i.glyph}</div><h3>{i.title}</h3><p>{i.summary}</p><div>{i.tags.map(t => <em key={t}>#{t}</em>)}</div><button onClick={() => setSelected(i)}>查看记忆 <Icon name="arrow" size={16}/></button></article>)}</div></section>}
 
       {page === "profile" && <section className="page-content"><div className="settings-grid"><section className="panel settings"><h2>数据来源</h2><p>先用稳定、透明的方式收集信息。</p>{[["系统分享入口","手机 App 接入后可用","share"],["浏览器扩展","首版后续接入","book"],["相册截图","等待 App 授权","inbox"]].map(([a,b,c]) => <button key={a}><Icon name={c}/><span><b>{a}</b><small>{b}</small></span><em>规划中</em></button>)}</section><section className="panel settings"><h2>数据空间</h2><p>不同内容使用不同处理方式。</p>{[["普通空间","云同步与 AI 整理","已启用"],["私密空间","仅保存在本地","未启用"],["临时空间","30 天后自动删除","未启用"]].map(([a,b,c]) => <button key={a}><span><b>{a}</b><small>{b}</small></span><em className={c === "已启用" ? "on" : ""}>{c}</em></button>)}</section></div><div className="privacy-note"><b>你的原始内容始终可追溯</b><p>AI 只提出摘要、标签和关联建议，不会自动删除或改写原始内容。你可以随时导出全部数据。</p><button>查看隐私说明</button></div></section>}
     </main>
