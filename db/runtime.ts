@@ -6,6 +6,9 @@ export type D1Binding = Parameters<
 
 export type RuntimeEnv = {
   DB: D1Binding;
+  OPENAI_API_KEY?: string;
+  OPENAI_MODEL?: string;
+  OPENAI_BASE_URL?: string;
 };
 
 const runtimeEnv = new AsyncLocalStorage<RuntimeEnv>();
@@ -23,4 +26,10 @@ export function getD1(): D1Binding {
     throw new Error("数据库绑定在当前请求中不可用");
   }
   return env.DB;
+}
+
+export function getRuntimeEnv(): RuntimeEnv {
+  const env = runtimeEnv.getStore();
+  if (!env) throw new Error("运行环境在当前请求中不可用");
+  return env;
 }

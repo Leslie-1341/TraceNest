@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const memoryItems = sqliteTable("memory_items", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -15,6 +15,18 @@ export const memoryItems = sqliteTable("memory_items", {
   glyph: text("glyph").notNull().default("记"),
   status: text("status").notNull().default("inbox"),
   processingStatus: text("processing_status").notNull().default("ready"),
+  originalUrl: text("original_url"),
+  canonicalUrl: text("canonical_url"),
+  contentHash: text("content_hash"),
+  author: text("author"),
+  siteName: text("site_name"),
+  duplicateOfId: integer("duplicate_of_id"),
+  processingError: text("processing_error"),
+  aiProvider: text("ai_provider"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-});
+}, (table) => [
+  uniqueIndex("memory_items_canonical_url_idx").on(table.canonicalUrl),
+  index("memory_items_content_hash_idx").on(table.contentHash),
+  index("memory_items_status_idx").on(table.status),
+]);

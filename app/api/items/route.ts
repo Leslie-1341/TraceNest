@@ -1,6 +1,7 @@
-import { and, desc, eq, like, or } from "drizzle-orm";
+import { and, desc, eq, like, ne, or } from "drizzle-orm";
 import { getD1, getDb } from "../../../db";
 import { memoryItems } from "../../../db/schema";
+import { analyzeContent, canonicalizeUrl, extractWebPage, fingerprintContent, looksLikeUrl } from "../../../lib/content-pipeline";
 
 const demoItems = [
   ["异步预取设计", "记录了在 OS 大赛中实现异步预取的思路与细节，包括 KV Cache 的分层管理与预取时机策略。", "项目笔记", "笔记", "用于完善 KV Cache 异步预取方案", ["系统优化", "KV Cache", "代码"], "OS 大赛", "sage", "芯"],
@@ -37,24 +38,39 @@ async function seedIfEmpty() {
   })));
 }
 
+const extraColumns: Record<string, string> = {
+  original_url: "TEXT", canonical_url: "TEXT", content_hash: "TEXT", author: "TEXT", site_name: "TEXT",
+  duplicate_of_id: "INTEGER", processing_error: "TEXT", ai_provider: "TEXT",
+};
+
 async function ensureSchema() {
-  await getD1().prepare(`CREATE TABLE IF NOT EXISTS memory_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL DEFAULT '',
-    summary TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL DEFAULT '手动记录',
-    kind TEXT NOT NULL DEFAULT '笔记',
-    reason TEXT NOT NULL DEFAULT '',
-    tags TEXT NOT NULL DEFAULT '[]',
-    project TEXT,
-    color TEXT NOT NULL DEFAULT 'sage',
-    glyph TEXT NOT NULL DEFAULT '记',
-    status TEXT NOT NULL DEFAULT 'inbox',
-    processing_status TEXT NOT NULL DEFAULT 'ready',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  const d1 = getD1();
+  await d1.prepare(`CREATE TABLE IF NOT EXISTS memory_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '手动记录', kind TEXT NOT NULL DEFAULT '笔记',
+    reason TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]', project TEXT, color TEXT NOT NULL DEFAULT 'sage',
+    glyph TEXT NOT NULL DEFAULT '记', status TEXT NOT NULL DEFAULT 'inbox', processing_status TEXT NOT NULL DEFAULT 'ready',
+    original_url TEXT, canonical_url TEXT, content_hash TEXT, author TEXT, site_name TEXT, duplicate_of_id INTEGER,
+    processing_error TEXT, ai_provider TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`).run();
+  const info = await d1.prepare("PRAGMA table_info(memory_items)").all<{ name: string }>();
+  const known = new Set((info.results || []).map(column => column.name));
+  for (const [name, definition] of Object.entries(extraColumns)) {
+    if (!known.has(name)) await d1.prepare(`ALTER TABLE memory_items ADD COLUMN ${name} ${definition}`).run();
+  }
+  await d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS memory_items_canonical_url_idx ON memory_items (canonical_url)").run();
+  await d1.prepare("CREATE INDEX IF NOT EXISTS memory_items_content_hash_idx ON memory_items (content_hash)").run();
+  await d1.prepare("CREATE INDEX IF NOT EXISTS memory_items_status_idx ON memory_items (status)").run();
+}
+
+function visualFor(kind: string) {
+  if (kind === "代码") return { color: "ink", glyph: "GH" };
+  if (kind === "视频") return { color: "coral", glyph: "播" };
+  if (kind === "待办") return { color: "amber", glyph: "办" };
+  if (kind === "日记") return { color: "coral", glyph: "日" };
+  if (kind === "文章") return { color: "blue", glyph: "网" };
+  return { color: "sage", glyph: "记" };
 }
 
 export async function GET(request: Request) {
@@ -65,7 +81,7 @@ export async function GET(request: Request) {
     const query = url.searchParams.get("q")?.trim() ?? "";
     const status = url.searchParams.get("status")?.trim() ?? "";
     const filters = [];
-    if (query) filters.push(or(like(memoryItems.title, `%${query}%`), like(memoryItems.content, `%${query}%`), like(memoryItems.summary, `%${query}%`), like(memoryItems.tags, `%${query}%`))!);
+    if (query) filters.push(or(like(memoryItems.title, `%${query}%`), like(memoryItems.content, `%${query}%`), like(memoryItems.summary, `%${query}%`), like(memoryItems.tags, `%${query}%`), like(memoryItems.canonicalUrl, `%${query}%`))!);
     if (status) filters.push(eq(memoryItems.status, status));
     const where = filters.length > 1 ? and(...filters) : filters[0];
     const rows = await getDb().select().from(memoryItems).where(where).orderBy(desc(memoryItems.createdAt), desc(memoryItems.id)).limit(100);
@@ -78,22 +94,83 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     await ensureSchema();
-    const payload = await request.json() as { title?: string; content?: string; kind?: string; reason?: string; tags?: string[]; project?: string };
+    const payload = await request.json() as { title?: string; content?: string; url?: string; kind?: string; reason?: string; tags?: string[]; project?: string };
     const content = payload.content?.trim() ?? "";
-    const title = payload.title?.trim() || content.split(/\n/)[0]?.slice(0, 36) || "未命名记录";
-    if (!content && !payload.title?.trim()) return Response.json({ error: "记录内容不能为空" }, { status: 400 });
-    const now = new Date().toISOString();
-    const [row] = await getDb().insert(memoryItems).values({
-      title, content, summary: content.slice(0, 120), source: "手动记录", kind: payload.kind || "笔记",
-      reason: payload.reason?.trim() || "", tags: JSON.stringify(payload.tags || []), project: payload.project?.trim() || null,
-      color: payload.kind === "待办" ? "amber" : payload.kind === "日记" ? "coral" : "sage",
-      glyph: payload.kind === "待办" ? "办" : payload.kind === "日记" ? "日" : "记",
-      status: "inbox", processingStatus: "pending", createdAt: now, updatedAt: now,
-    }).returning();
-    return Response.json({ item: present(row) }, { status: 201 });
+    const rawUrl = payload.url?.trim() || ((payload.kind === "链接" || looksLikeUrl(content)) ? content : "");
+    if (!content && !payload.title?.trim() && !rawUrl) return Response.json({ error: "记录内容不能为空" }, { status: 400 });
+    if (rawUrl) return saveLink(payload, rawUrl);
+    return saveText(payload, content);
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "保存失败" }, { status: 500 });
   }
+}
+
+async function saveLink(payload: { reason?: string; project?: string }, rawUrl: string) {
+  const db = getDb();
+  const canonicalUrl = canonicalizeUrl(rawUrl);
+  const [existing] = await db.select().from(memoryItems).where(eq(memoryItems.canonicalUrl, canonicalUrl)).limit(1);
+  if (existing) return Response.json({ error: "已收藏过该链接", duplicate: present(existing) }, { status: 409 });
+
+  const now = new Date().toISOString();
+  const host = new URL(canonicalUrl).hostname.replace(/^www\./, "");
+  const [placeholder] = await db.insert(memoryItems).values({
+    title: host, content: rawUrl, summary: "正在提取网页正文…", source: host, kind: "文章",
+    reason: payload.reason?.trim() || "", tags: "[]", project: payload.project?.trim() || null,
+    color: "blue", glyph: "网", status: "inbox", processingStatus: "processing",
+    originalUrl: rawUrl, canonicalUrl, createdAt: now, updatedAt: now,
+  }).returning();
+
+  try {
+    const page = await extractWebPage(canonicalUrl);
+    const [sameContent] = await db.select().from(memoryItems).where(and(
+      ne(memoryItems.id, placeholder.id),
+      or(eq(memoryItems.canonicalUrl, page.canonicalUrl), eq(memoryItems.contentHash, page.contentHash)),
+    )).limit(1);
+    if (sameContent) {
+      const [duplicate] = await db.update(memoryItems).set({
+        title: page.title, content: page.text, summary: `与「${sameContent.title}」内容重复`, source: page.siteName,
+        canonicalUrl: page.canonicalUrl, contentHash: page.contentHash, author: page.author, siteName: page.siteName,
+        duplicateOfId: sameContent.id, processingStatus: "duplicate", updatedAt: new Date().toISOString(),
+      }).where(eq(memoryItems.id, placeholder.id)).returning();
+      return Response.json({ item: present(duplicate) }, { status: 201 });
+    }
+    const analysis = await analyzeContent(page.title, page.text, page.canonicalUrl);
+    const visual = visualFor(analysis.kind);
+    const [ready] = await db.update(memoryItems).set({
+      title: page.title, content: page.text, summary: analysis.summary, source: page.siteName, kind: analysis.kind,
+      tags: JSON.stringify(analysis.tags), color: visual.color, glyph: visual.glyph, canonicalUrl: page.canonicalUrl,
+      contentHash: page.contentHash, author: page.author, siteName: page.siteName, processingStatus: "ready",
+      processingError: null, aiProvider: analysis.provider, updatedAt: new Date().toISOString(),
+    }).where(eq(memoryItems.id, placeholder.id)).returning();
+    return Response.json({ item: present(ready) }, { status: 201 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "网页处理失败";
+    const [failed] = await db.update(memoryItems).set({
+      summary: "链接已保存，但网页正文暂时无法提取。", processingStatus: "failed", processingError: message,
+      updatedAt: new Date().toISOString(),
+    }).where(eq(memoryItems.id, placeholder.id)).returning();
+    return Response.json({ item: present(failed), warning: message }, { status: 202 });
+  }
+}
+
+async function saveText(payload: { title?: string; kind?: string; reason?: string; tags?: string[]; project?: string }, content: string) {
+  const db = getDb();
+  const title = payload.title?.trim() || content.split(/\n/)[0]?.slice(0, 36) || "未命名记录";
+  const analysis = await analyzeContent(title, content);
+  const contentHash = await fingerprintContent(content);
+  const [sameContent] = await db.select().from(memoryItems).where(eq(memoryItems.contentHash, contentHash)).limit(1);
+  const kind = payload.kind && !["想法", "链接"].includes(payload.kind) ? payload.kind : "笔记";
+  const visual = visualFor(kind);
+  const now = new Date().toISOString();
+  const [row] = await db.insert(memoryItems).values({
+    title, content, summary: sameContent ? `与「${sameContent.title}」内容重复` : analysis.summary,
+    source: "手动记录", kind, reason: payload.reason?.trim() || "",
+    tags: JSON.stringify(payload.tags?.length ? payload.tags : analysis.tags), project: payload.project?.trim() || null,
+    color: visual.color, glyph: visual.glyph, status: "inbox", contentHash,
+    duplicateOfId: sameContent?.id || null, processingStatus: sameContent ? "duplicate" : "ready",
+    aiProvider: analysis.provider, createdAt: now, updatedAt: now,
+  }).returning();
+  return Response.json({ item: present(row) }, { status: 201 });
 }
 
 export async function PATCH(request: Request) {

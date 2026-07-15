@@ -17,6 +17,13 @@ type Item = {
   project?: string;
   status?: string;
   processingStatus?: string;
+  originalUrl?: string;
+  canonicalUrl?: string;
+  author?: string;
+  siteName?: string;
+  duplicateOfId?: number;
+  processingError?: string;
+  aiProvider?: "openai" | "rules";
 };
 
 const demoItems: Item[] = [
@@ -58,10 +65,11 @@ function Brand() {
 }
 
 function ItemRow({ item, onOpen }: { item: Item; onOpen: (i: Item) => void }) {
+  const processingLabel = item.processingStatus === "failed" ? "提取失败" : item.processingStatus === "duplicate" ? "重复内容" : item.processingStatus === "processing" ? "处理中" : item.aiProvider === "openai" ? "AI 已整理" : item.aiProvider === "rules" ? "规则整理" : "";
   return <button className="item-row" onClick={() => onOpen(item)}>
     <span className={`source-icon ${item.color}`}>{item.glyph}</span>
     <span className="item-main"><b>{item.title}</b><small>{item.source} · {item.summary}</small></span>
-    <span className="item-meta"><small>{item.time}</small><em>{item.kind}</em></span>
+    <span className="item-meta"><small>{item.time}</small><span>{processingLabel && <i className={`processing-badge ${item.processingStatus || item.aiProvider}`}>{processingLabel}</i>}<em>{item.kind}</em></span></span>
     <Icon name="arrow" size={17}/>
   </button>;
 }
@@ -78,6 +86,8 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [records, setRecords] = useState<Item[]>(demoItems);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [reason, setReason] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -98,13 +108,23 @@ export default function Home() {
     e?.preventDefault();
     if (!note.trim()) { setToast("先写下一点什么"); return; }
     const content = note.trim();
+    const isLink = noteMode === "链接" || /^https?:\/\/\S+$/i.test(content);
+    setSaving(true);
     try {
-      const response = await fetch("/api/items", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content, kind: noteMode }) });
-      if (!response.ok) throw new Error("保存失败");
-      const data = await response.json() as { item: Item };
+      const response = await fetch("/api/items", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content, kind: isLink ? "链接" : noteMode, reason }) });
+      const data = await response.json() as { item?: Item; duplicate?: Item; error?: string; warning?: string };
+      if (response.status === 409 && data.duplicate) {
+        setSelected(data.duplicate); setToast("这条链接已经收藏过，已为你打开原记录");
+        setTimeout(() => setToast(""), 2600);
+        return;
+      }
+      if (!response.ok || !data.item) throw new Error(data.error || "保存失败");
       setRecords(current => [data.item, ...current]);
-      setSaved(true); setToast(`${noteMode}已放入收件箱`); setNote(""); setComposer(false);
-    } catch { setToast("保存失败，请稍后重试"); }
+      setSaved(true);
+      setToast(data.item.processingStatus === "failed" ? "链接已保存，正文暂时无法提取" : data.item.processingStatus === "duplicate" ? "已保存并识别为重复内容" : data.item.aiProvider === "openai" ? "已提取正文并完成 AI 整理" : isLink ? "已提取正文并完成自动整理" : `${noteMode}已放入收件箱`);
+      setNote(""); setReason(""); setComposer(false);
+    } catch (error) { setToast(error instanceof Error ? error.message : "保存失败，请稍后重试"); }
+    finally { setSaving(false); }
     setTimeout(() => setSaved(false), 1800); setTimeout(() => setToast(""), 2400);
   }
 
@@ -132,7 +152,7 @@ export default function Home() {
       {page === "today" && <section className="page-content today-page">
         <form className="quick-card" onSubmit={saveNote}>
           <textarea value={note} onChange={e => setNote(e.target.value)} placeholder="记录此刻想到的…" aria-label="快速记录"/>
-          <div className="quick-footer"><div className="modes">{["想法", "待办", "日记"].map(m => <button type="button" className={noteMode === m ? "active" : ""} onClick={() => setNoteMode(m)} key={m}>{m === "待办" && <Icon name="check" size={15}/>} {m}</button>)}<button type="button"><Icon name="mic" size={16}/> 语音</button></div><button className="save-note" type="submit">{saved ? "已保存" : "保存"} <span>⌘ Enter</span></button></div>
+          <div className="quick-footer"><div className="modes">{["想法", "待办", "日记"].map(m => <button type="button" className={noteMode === m ? "active" : ""} onClick={() => setNoteMode(m)} key={m}>{m === "待办" && <Icon name="check" size={15}/>} {m}</button>)}<button type="button"><Icon name="mic" size={16}/> 语音</button></div><button className="save-note" type="submit" disabled={saving}>{saving ? "正在整理…" : saved ? "已保存" : "保存"} <span>⌘ Enter</span></button></div>
         </form>
         <div className="today-grid">
           <section><div className="section-title"><div><span className="eyebrow"><Icon name="spark" size={15}/>AI 为你回顾</span><h2>过去的线索，今天可能有用</h2></div><button onClick={() => setPage("review")}>换一组</button></div>
@@ -153,13 +173,14 @@ export default function Home() {
 
     <nav className="mobile-nav">{nav.slice(0,4).map(([id,label,icon]) => <button key={id} className={page === id ? "active" : ""} onClick={() => setPage(id)}><Icon name={icon}/><span>{label}</span></button>)}<button className="mobile-add" onClick={() => setComposer(true)}><Icon name="plus"/></button></nav>
 
-    {(selected || composer) && <div className="overlay" onMouseDown={() => {setSelected(null);setComposer(false)}}><aside className="drawer" onMouseDown={e => e.stopPropagation()}><button className="drawer-close" onClick={() => {setSelected(null);setComposer(false)}}><Icon name="close"/></button>{selected ? <Detail item={selected}/> : <form className="composer" onSubmit={saveNote}><span className="eyebrow">快速收集</span><h2>保存一条新记忆</h2><p>不用先分类，拾迹会在后台理解和整理。</p><textarea autoFocus value={note} onChange={e => setNote(e.target.value)} placeholder="粘贴链接、写下想法，或描述待办…"/><div className="composer-modes">{["想法","待办","日记","链接"].map(m => <button type="button" className={noteMode === m ? "active" : ""} onClick={() => setNoteMode(m)} key={m}>{m}</button>)}</div><label>为什么保存？<input placeholder="可选，例如：用于拾迹交互设计"/></label><button className="primary" type="submit">放入收件箱</button></form>}</aside></div>}
+    {(selected || composer) && <div className="overlay" onMouseDown={() => {setSelected(null);setComposer(false)}}><aside className="drawer" onMouseDown={e => e.stopPropagation()}><button className="drawer-close" onClick={() => {setSelected(null);setComposer(false)}}><Icon name="close"/></button>{selected ? <Detail item={selected}/> : <form className="composer" onSubmit={saveNote}><span className="eyebrow">快速收集</span><h2>保存一条新记忆</h2><p>粘贴链接后，拾迹会提取正文、生成摘要与标签，并检查重复内容。</p><textarea autoFocus value={note} onChange={e => setNote(e.target.value)} placeholder="粘贴链接、写下想法，或描述待办…"/><div className="composer-modes">{["想法","待办","日记","链接"].map(m => <button type="button" className={noteMode === m ? "active" : ""} onClick={() => setNoteMode(m)} key={m}>{m}</button>)}</div><label>为什么保存？<input value={reason} onChange={e => setReason(e.target.value)} placeholder="可选，例如：用于拾迹交互设计"/></label><button className="primary" type="submit" disabled={saving}>{saving ? (noteMode === "链接" || /^https?:\/\//i.test(note) ? "正在提取与整理…" : "正在保存…") : "放入收件箱"}</button></form>}</aside></div>}
     {toast && <div className="toast"><Icon name="check" size={17}/>{toast}</div>}
   </div>;
 }
 
 function Detail({ item }: { item: Item }) {
-  return <div className="detail"><span className={`source-icon detail-icon ${item.color}`}>{item.glyph}</span><span className="eyebrow">{item.source} · {item.time}</span><h2>{item.title}</h2><p className="detail-summary">{item.summary}</p><div className="ai-box"><span><Icon name="spark" size={16}/>AI 理解</span><p>这条内容主要与 <b>{item.tags[0]}</b> 有关，适合在{item.project ? `「${item.project}」项目` : "后续研究"}中重新使用。</p></div><section><h3>为什么收藏</h3><p>{item.reason}</p></section><section><h3>自动标签</h3><div className="tags">{item.tags.map(t => <em key={t}><Icon name="tag" size={13}/>{t}</em>)}</div></section>{item.project && <section><h3>关联项目</h3><button className="project-link">{item.project}<Icon name="arrow" size={16}/></button></section>}<div className="detail-actions"><button>标记已使用</button><button className="primary">打开原内容</button></div></div>;
+  const statusText = item.processingStatus === "failed" ? `正文提取失败：${item.processingError || "网页可能需要登录"}` : item.processingStatus === "duplicate" ? "系统发现这条内容与已有记录高度重复，原始链接仍已保留。" : item.aiProvider === "openai" ? "已完成网页正文提取、AI 摘要与自动标签。" : item.aiProvider === "rules" ? "已完成正文提取，并使用本地规则生成摘要与标签。" : "原始内容已安全保存。";
+  return <div className="detail"><span className={`source-icon detail-icon ${item.color}`}>{item.glyph}</span><span className="eyebrow">{item.source} · {item.time}</span><h2>{item.title}</h2><p className="detail-summary">{item.summary}</p><div className={`pipeline-status ${item.processingStatus || "ready"}`}><b>{item.processingStatus === "failed" ? "需要重试" : item.processingStatus === "duplicate" ? "重复内容" : "处理完成"}</b><span>{statusText}</span></div><div className="ai-box"><span><Icon name="spark" size={16}/>{item.aiProvider === "openai" ? "AI 理解" : "自动理解"}</span><p>{item.tags.length ? <>这条内容主要与 <b>{item.tags[0]}</b> 有关，适合在{item.project ? `「${item.project}」项目` : "后续研究"}中重新使用。</> : "标签仍在等待补充，原始内容不受影响。"}</p></div>{(item.siteName || item.author) && <section><h3>来源信息</h3><p>{[item.siteName, item.author].filter(Boolean).join(" · ")}</p></section>}<section><h3>为什么收藏</h3><p>{item.reason || "尚未补充"}</p></section><section><h3>自动标签</h3><div className="tags">{item.tags.length ? item.tags.map(t => <em key={t}><Icon name="tag" size={13}/>{t}</em>) : <span>暂无标签</span>}</div></section>{item.project && <section><h3>关联项目</h3><button className="project-link">{item.project}<Icon name="arrow" size={16}/></button></section>}<div className="detail-actions"><button>标记已使用</button>{item.originalUrl && <a className="primary" href={item.originalUrl} target="_blank" rel="noreferrer">打开原内容</a>}</div></div>;
 }
 
 function Empty() { return <div className="empty"><Icon name="search" size={32}/><b>没有找到相关内容</b><p>换一个关键词，或清除筛选条件。</p></div>; }
