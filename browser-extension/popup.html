@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>收藏到拾迹</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="icons/icon-48.png" alt="">
+        <span><b>拾迹</b><small>TraceNest</small></span>
+        <button id="open-site" type="button" title="打开拾迹">打开</button>
+      </header>
+
+      <section class="page-card">
+        <span id="site-name">正在读取当前页面…</span>
+        <h1 id="page-title">当前网页</h1>
+        <p id="page-url"></p>
+      </section>
+
+      <div class="capture-modes" role="group" aria-label="收藏内容">
+        <button class="active" id="mode-page" type="button">整个网页</button>
+        <button id="mode-selection" type="button" disabled>选中文字</button>
+      </div>
+
+      <section class="selection-card" id="selection-card" hidden>
+        <span>将保存这段文字</span>
+        <p id="selection-preview"></p>
+      </section>
+
+      <label for="reason">为什么收藏？</label>
+      <textarea id="reason" maxlength="160" placeholder="可选，例如：之后做产品交互时参考"></textarea>
+
+      <button class="primary" id="save" type="button">收藏到拾迹</button>
+      <div class="status" id="status" aria-live="polite" hidden></div>
+
+      <footer>无需分类，拾迹会自动提取、摘要、标签和去重。</footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

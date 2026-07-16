@@ -73,6 +73,22 @@ function visualFor(kind: string) {
   return { color: "sage", glyph: "记" };
 }
 
+function withExtensionCors(request: Request, response: Response) {
+  const origin = request.headers.get("origin") || "";
+  if (!/^(chrome|edge)-extension:\/\/[a-z]{32}$/i.test(origin)) return response;
+  const headers = new Headers(response.headers);
+  headers.set("access-control-allow-origin", origin);
+  headers.set("access-control-allow-credentials", "true");
+  headers.set("access-control-allow-headers", "content-type");
+  headers.set("access-control-allow-methods", "GET, POST, PATCH, OPTIONS");
+  headers.append("vary", "Origin");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+export async function OPTIONS(request: Request) {
+  return withExtensionCors(request, new Response(null, { status: 204 }));
+}
+
 export async function GET(request: Request) {
   try {
     await ensureSchema();
@@ -85,23 +101,23 @@ export async function GET(request: Request) {
     if (status) filters.push(eq(memoryItems.status, status));
     const where = filters.length > 1 ? and(...filters) : filters[0];
     const rows = await getDb().select().from(memoryItems).where(where).orderBy(desc(memoryItems.createdAt), desc(memoryItems.id)).limit(100);
-    return Response.json({ items: rows.map(present) });
+    return withExtensionCors(request, Response.json({ items: rows.map(present) }));
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "读取失败" }, { status: 500 });
+    return withExtensionCors(request, Response.json({ error: error instanceof Error ? error.message : "读取失败" }, { status: 500 }));
   }
 }
 
 export async function POST(request: Request) {
   try {
     await ensureSchema();
-    const payload = await request.json() as { title?: string; content?: string; url?: string; kind?: string; reason?: string; tags?: string[]; project?: string };
+    const payload = await request.json() as { title?: string; content?: string; url?: string; sourceUrl?: string; captureType?: string; kind?: string; reason?: string; tags?: string[]; project?: string };
     const content = payload.content?.trim() ?? "";
     const rawUrl = payload.url?.trim() || ((payload.kind === "链接" || looksLikeUrl(content)) ? content : "");
-    if (!content && !payload.title?.trim() && !rawUrl) return Response.json({ error: "记录内容不能为空" }, { status: 400 });
-    if (rawUrl) return saveLink(payload, rawUrl);
-    return saveText(payload, content);
+    if (!content && !payload.title?.trim() && !rawUrl) return withExtensionCors(request, Response.json({ error: "记录内容不能为空" }, { status: 400 }));
+    const response = rawUrl ? await saveLink(payload, rawUrl) : await saveText(payload, content);
+    return withExtensionCors(request, response);
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "保存失败" }, { status: 500 });
+    return withExtensionCors(request, Response.json({ error: error instanceof Error ? error.message : "保存失败" }, { status: 500 }));
   }
 }
 
@@ -153,7 +169,7 @@ async function saveLink(payload: { reason?: string; project?: string }, rawUrl: 
   }
 }
 
-async function saveText(payload: { title?: string; kind?: string; reason?: string; tags?: string[]; project?: string }, content: string) {
+async function saveText(payload: { title?: string; sourceUrl?: string; captureType?: string; kind?: string; reason?: string; tags?: string[]; project?: string }, content: string) {
   const db = getDb();
   const title = payload.title?.trim() || content.split(/\n/)[0]?.slice(0, 36) || "未命名记录";
   const analysis = await analyzeContent(title, content);
@@ -161,14 +177,16 @@ async function saveText(payload: { title?: string; kind?: string; reason?: strin
   const [sameContent] = await db.select().from(memoryItems).where(eq(memoryItems.contentHash, contentHash)).limit(1);
   const kind = payload.kind && !["想法", "链接"].includes(payload.kind) ? payload.kind : "笔记";
   const visual = visualFor(kind);
+  const sourceUrl = payload.sourceUrl && looksLikeUrl(payload.sourceUrl) ? payload.sourceUrl : null;
+  const source = sourceUrl ? new URL(sourceUrl).hostname.replace(/^www\./, "") : "手动记录";
   const now = new Date().toISOString();
   const [row] = await db.insert(memoryItems).values({
     title, content, summary: sameContent ? `与「${sameContent.title}」内容重复` : analysis.summary,
-    source: "手动记录", kind, reason: payload.reason?.trim() || "",
+    source, kind, reason: payload.reason?.trim() || (payload.captureType === "selection" ? "浏览器划词摘录" : ""),
     tags: JSON.stringify(payload.tags?.length ? payload.tags : analysis.tags), project: payload.project?.trim() || null,
     color: visual.color, glyph: visual.glyph, status: "inbox", contentHash,
     duplicateOfId: sameContent?.id || null, processingStatus: sameContent ? "duplicate" : "ready",
-    aiProvider: analysis.provider, createdAt: now, updatedAt: now,
+    originalUrl: sourceUrl, aiProvider: analysis.provider, createdAt: now, updatedAt: now,
   }).returning();
   return Response.json({ item: present(row) }, { status: 201 });
 }
@@ -177,14 +195,14 @@ export async function PATCH(request: Request) {
   try {
     await ensureSchema();
     const payload = await request.json() as { id?: number; status?: string; reason?: string };
-    if (!payload.id) return Response.json({ error: "id is required" }, { status: 400 });
+    if (!payload.id) return withExtensionCors(request, Response.json({ error: "id is required" }, { status: 400 }));
     const changes: Partial<typeof memoryItems.$inferInsert> = { updatedAt: new Date().toISOString() };
     if (payload.status) changes.status = payload.status;
     if (payload.reason !== undefined) changes.reason = payload.reason.trim();
     const [row] = await getDb().update(memoryItems).set(changes).where(eq(memoryItems.id, payload.id)).returning();
-    if (!row) return Response.json({ error: "记录不存在" }, { status: 404 });
-    return Response.json({ item: present(row) });
+    if (!row) return withExtensionCors(request, Response.json({ error: "记录不存在" }, { status: 404 }));
+    return withExtensionCors(request, Response.json({ item: present(row) }));
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "更新失败" }, { status: 500 });
+    return withExtensionCors(request, Response.json({ error: error instanceof Error ? error.message : "更新失败" }, { status: 500 }));
   }
 }
