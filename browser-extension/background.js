@@ -16,9 +16,14 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 
   const selection = info.menuItemId === "tracenest-save-selection" ? (info.selectionText || "").trim() : "";
+  let metadata = {};
+  try {
+    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: collectPageMetadata });
+    metadata = result?.result || {};
+  } catch { /* Tab title and URL remain usable. */ }
   const payload = selection
     ? { captureType: "selection", title: `摘录 · ${tab.title || "未命名网页"}`, content: selection, sourceUrl: tab.url, reason: "浏览器划词摘录" }
-    : { url: tab.url, content: tab.url, kind: "链接", reason: "浏览器右键收藏" };
+    : { url: tab.url, content: tab.url, kind: "链接", reason: "浏览器右键收藏", title: metadata.title || tab.title, description: metadata.description, author: metadata.author, siteName: metadata.siteName };
 
   try {
     const response = await fetch(API_URL, {
@@ -66,4 +71,14 @@ async function setBadge(success) {
   await chrome.action.setBadgeBackgroundColor({ color: success ? "#7E8E78" : "#B86F52" });
   await chrome.action.setBadgeText({ text: success ? "✓" : "!" });
   await chrome.alarms.create("tracenest-clear-badge", { delayInMinutes: 0.1 });
+}
+
+function collectPageMetadata() {
+  const meta = (selector) => document.querySelector(selector)?.getAttribute("content")?.trim() || "";
+  const text = (selector) => document.querySelector(selector)?.textContent?.trim() || "";
+  const title = meta('meta[property="og:title"]') || text("h1.ytd-watch-metadata yt-formatted-string") || text("h1.title yt-formatted-string") || document.title;
+  const description = meta('meta[property="og:description"]') || meta('meta[name="description"]') || text("#description-inline-expander") || text("#description");
+  const author = meta('meta[name="author"]') || text("ytd-channel-name a") || text('[itemprop="author"]');
+  const siteName = meta('meta[property="og:site_name"]') || location.hostname.replace(/^www\./, "");
+  return { title: title.slice(0, 180), description: description.slice(0, 4000), author: author.slice(0, 120), siteName: siteName.slice(0, 120) };
 }

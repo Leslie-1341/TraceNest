@@ -5,6 +5,7 @@ const SITE_URL = "https://tracenest-memory.luoxinrong2026.chatgpt.site";
 let currentTab = null;
 let selection = "";
 let mode = "page";
+let pageMetadata = {};
 
 const elements = {
   siteName: document.querySelector("#site-name"),
@@ -39,8 +40,11 @@ async function init() {
   elements.pageUrl.textContent = currentTab.url;
 
   try {
-    const [result] = await chrome.scripting.executeScript({ target: { tabId: currentTab.id }, func: () => window.getSelection()?.toString().trim() || "" });
-    selection = (result?.result || "").slice(0, 12000);
+    const [result] = await chrome.scripting.executeScript({ target: { tabId: currentTab.id }, func: collectPageMetadata });
+    pageMetadata = result?.result || {};
+    selection = (pageMetadata.selection || "").slice(0, 12000);
+    elements.pageTitle.textContent = pageMetadata.title || currentTab.title || "未命名网页";
+    elements.siteName.textContent = pageMetadata.siteName || url.hostname.replace(/^www\./, "");
   } catch {
     selection = "";
   }
@@ -83,7 +87,7 @@ async function saveCapture() {
   const reason = elements.reason.value.trim();
   const payload = mode === "selection"
     ? { captureType: "selection", title: `摘录 · ${currentTab.title || "未命名网页"}`, content: selection, sourceUrl: currentTab.url, reason }
-    : { url: currentTab.url, content: currentTab.url, kind: "链接", reason };
+    : { url: currentTab.url, content: currentTab.url, kind: "链接", reason, title: pageMetadata.title || currentTab.title, description: pageMetadata.description, author: pageMetadata.author, siteName: pageMetadata.siteName };
 
   elements.save.disabled = true;
   elements.save.textContent = mode === "selection" ? "正在整理摘录…" : "正在提取网页…";
@@ -126,4 +130,14 @@ function showStatus(message, type) {
 function hideStatus() {
   elements.status.hidden = true;
   elements.status.textContent = "";
+}
+
+function collectPageMetadata() {
+  const meta = (selector) => document.querySelector(selector)?.getAttribute("content")?.trim() || "";
+  const text = (selector) => document.querySelector(selector)?.textContent?.trim() || "";
+  const title = meta('meta[property="og:title"]') || text("h1.ytd-watch-metadata yt-formatted-string") || text("h1.title yt-formatted-string") || document.title;
+  const description = meta('meta[property="og:description"]') || meta('meta[name="description"]') || text("#description-inline-expander") || text("#description");
+  const author = meta('meta[name="author"]') || text("ytd-channel-name a") || text('[itemprop="author"]');
+  const siteName = meta('meta[property="og:site_name"]') || location.hostname.replace(/^www\./, "");
+  return { title: title.slice(0, 180), description: description.slice(0, 4000), author: author.slice(0, 120), siteName: siteName.slice(0, 120), selection: window.getSelection()?.toString().trim() || "" };
 }

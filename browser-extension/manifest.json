@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "拾迹 TraceNest",
   "description": "随手收藏网页与文字，让零散信息进入你的知识与成长轨迹。",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minimum_chrome_version": "109",
   "permissions": ["activeTab", "alarms", "contextMenus", "notifications", "scripting", "storage"],
   "host_permissions": ["https://tracenest-memory.luoxinrong2026.chatgpt.site/*"],

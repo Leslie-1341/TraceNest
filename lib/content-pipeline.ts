@@ -17,7 +17,7 @@ export type ExtractedPage = {
   contentHash: string;
 };
 
-const TRACKING_PARAMS = /^(utm_.+|fbclid|gclid|dclid|msclkid|spm|from|source|ref)$/i;
+const TRACKING_PARAMS = /^(utm_.+|fbclid|gclid|dclid|msclkid|spm|from|source|ref|si|feature)$/i;
 const MAX_HTML_CHARS = 2_000_000;
 const MAX_ARTICLE_CHARS = 45_000;
 

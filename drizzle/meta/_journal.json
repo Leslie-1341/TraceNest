@@ -15,6 +15,13 @@
       "when": 1784141643095,
       "tag": "0001_wealthy_steel_serpent",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784176910710,
+      "tag": "0002_cloudy_abomination",
+      "breakpoints": true
     }
   ]
 }

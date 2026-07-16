@@ -30,3 +30,19 @@ export const memoryItems = sqliteTable("memory_items", {
   index("memory_items_content_hash_idx").on(table.contentHash),
   index("memory_items_status_idx").on(table.status),
 ]);
+
+export const todoItems = sqliteTable("todo_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  title: text("title").notNull(),
+  notes: text("notes").notNull().default(""),
+  dueDate: text("due_date"),
+  dueTime: text("due_time"),
+  priority: text("priority").notNull().default("normal"),
+  completed: integer("completed", { mode: "boolean" }).notNull().default(false),
+  calendarProvider: text("calendar_provider").notNull().default("internal"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  index("todo_items_due_date_idx").on(table.dueDate),
+  index("todo_items_completed_idx").on(table.completed),
+]);

@@ -73,6 +73,27 @@ function visualFor(kind: string) {
   return { color: "sage", glyph: "记" };
 }
 
+type CapturedLinkMetadata = {
+  title?: string;
+  description?: string;
+  author?: string;
+  siteName?: string;
+  reason?: string;
+  project?: string;
+};
+
+function isMediaUrl(value: string) {
+  return /(?:youtube\.com\/(?:watch|shorts|live)|youtu\.be\/|bilibili\.com\/video|douyin\.com\/video)/i.test(value);
+}
+
+function cleanCapturedTitle(value: string | undefined, url: string) {
+  const cleaned = (value || "").replace(/\s*[-|·]\s*YouTube\s*$/i, "").trim();
+  if (cleaned && !/^-?\s*YouTube$/i.test(cleaned)) return cleaned.slice(0, 180);
+  const parsed = new URL(url);
+  const videoId = parsed.hostname.includes("youtu.be") ? parsed.pathname.split("/").filter(Boolean)[0] : parsed.searchParams.get("v") || parsed.pathname.match(/\/(?:shorts|live)\/([^/?]+)/)?.[1];
+  return videoId ? `YouTube 视频 · ${videoId}` : parsed.hostname.replace(/^www\./, "");
+}
+
 function withExtensionCors(request: Request, response: Response) {
   const origin = request.headers.get("origin") || "";
   if (!/^(chrome|edge)-extension:\/\/[a-z]{32}$/i.test(origin)) return response;
@@ -80,7 +101,7 @@ function withExtensionCors(request: Request, response: Response) {
   headers.set("access-control-allow-origin", origin);
   headers.set("access-control-allow-credentials", "true");
   headers.set("access-control-allow-headers", "content-type");
-  headers.set("access-control-allow-methods", "GET, POST, PATCH, OPTIONS");
+  headers.set("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS");
   headers.append("vary", "Origin");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
@@ -110,7 +131,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     await ensureSchema();
-    const payload = await request.json() as { title?: string; content?: string; url?: string; sourceUrl?: string; captureType?: string; kind?: string; reason?: string; tags?: string[]; project?: string };
+    const payload = await request.json() as { title?: string; description?: string; author?: string; siteName?: string; content?: string; url?: string; sourceUrl?: string; captureType?: string; kind?: string; reason?: string; tags?: string[]; project?: string };
     const content = payload.content?.trim() ?? "";
     const rawUrl = payload.url?.trim() || ((payload.kind === "链接" || looksLikeUrl(content)) ? content : "");
     if (!content && !payload.title?.trim() && !rawUrl) return withExtensionCors(request, Response.json({ error: "记录内容不能为空" }, { status: 400 }));
@@ -121,7 +142,7 @@ export async function POST(request: Request) {
   }
 }
 
-async function saveLink(payload: { reason?: string; project?: string }, rawUrl: string) {
+async function saveLink(payload: CapturedLinkMetadata, rawUrl: string) {
   const db = getDb();
   const canonicalUrl = canonicalizeUrl(rawUrl);
   const [existing] = await db.select().from(memoryItems).where(eq(memoryItems.canonicalUrl, canonicalUrl)).limit(1);
@@ -129,33 +150,48 @@ async function saveLink(payload: { reason?: string; project?: string }, rawUrl: 
 
   const now = new Date().toISOString();
   const host = new URL(canonicalUrl).hostname.replace(/^www\./, "");
+  const capturedTitle = cleanCapturedTitle(payload.title, canonicalUrl);
   const [placeholder] = await db.insert(memoryItems).values({
-    title: host, content: rawUrl, summary: "正在提取网页正文…", source: host, kind: "文章",
+    title: capturedTitle || host, content: rawUrl, summary: "正在提取网页正文…", source: payload.siteName?.trim() || host, kind: isMediaUrl(canonicalUrl) ? "视频" : "文章",
     reason: payload.reason?.trim() || "", tags: "[]", project: payload.project?.trim() || null,
     color: "blue", glyph: "网", status: "inbox", processingStatus: "processing",
     originalUrl: rawUrl, canonicalUrl, createdAt: now, updatedAt: now,
   }).returning();
 
   try {
-    const page = await extractWebPage(canonicalUrl);
+    let page: Awaited<ReturnType<typeof extractWebPage>>;
+    try {
+      page = await extractWebPage(canonicalUrl);
+    } catch (error) {
+      if (!payload.title && !payload.description) throw error;
+      const metadataText = [capturedTitle, payload.description].filter(Boolean).join("。") || capturedTitle;
+      page = {
+        title: capturedTitle, text: metadataText, author: payload.author?.trim() || null,
+        siteName: payload.siteName?.trim() || host, canonicalUrl, contentHash: await fingerprintContent(metadataText),
+      };
+    }
+    const media = isMediaUrl(page.canonicalUrl);
+    const title = payload.title ? cleanCapturedTitle(payload.title, page.canonicalUrl) : page.title;
+    const text = media ? [title, payload.description?.trim()].filter(Boolean).join("。") || title : page.text;
+    const contentHash = media ? await fingerprintContent(`media:${page.canonicalUrl}`) : page.contentHash;
     const [sameContent] = await db.select().from(memoryItems).where(and(
       ne(memoryItems.id, placeholder.id),
-      or(eq(memoryItems.canonicalUrl, page.canonicalUrl), eq(memoryItems.contentHash, page.contentHash)),
+      media ? eq(memoryItems.canonicalUrl, page.canonicalUrl) : or(eq(memoryItems.canonicalUrl, page.canonicalUrl), eq(memoryItems.contentHash, contentHash)),
     )).limit(1);
     if (sameContent) {
       const [duplicate] = await db.update(memoryItems).set({
-        title: page.title, content: page.text, summary: `与「${sameContent.title}」内容重复`, source: page.siteName,
-        canonicalUrl: page.canonicalUrl, contentHash: page.contentHash, author: page.author, siteName: page.siteName,
+        title, content: text, summary: `与「${sameContent.title}」内容重复`, source: payload.siteName?.trim() || page.siteName,
+        canonicalUrl: page.canonicalUrl, contentHash, author: payload.author?.trim() || page.author, siteName: payload.siteName?.trim() || page.siteName,
         duplicateOfId: sameContent.id, processingStatus: "duplicate", updatedAt: new Date().toISOString(),
       }).where(eq(memoryItems.id, placeholder.id)).returning();
       return Response.json({ item: present(duplicate) }, { status: 201 });
     }
-    const analysis = await analyzeContent(page.title, page.text, page.canonicalUrl);
+    const analysis = await analyzeContent(title, text, page.canonicalUrl);
     const visual = visualFor(analysis.kind);
     const [ready] = await db.update(memoryItems).set({
-      title: page.title, content: page.text, summary: analysis.summary, source: page.siteName, kind: analysis.kind,
+      title, content: text, summary: analysis.summary, source: payload.siteName?.trim() || page.siteName, kind: analysis.kind,
       tags: JSON.stringify(analysis.tags), color: visual.color, glyph: visual.glyph, canonicalUrl: page.canonicalUrl,
-      contentHash: page.contentHash, author: page.author, siteName: page.siteName, processingStatus: "ready",
+      contentHash, author: payload.author?.trim() || page.author, siteName: payload.siteName?.trim() || page.siteName, processingStatus: "ready",
       processingError: null, aiProvider: analysis.provider, updatedAt: new Date().toISOString(),
     }).where(eq(memoryItems.id, placeholder.id)).returning();
     return Response.json({ item: present(ready) }, { status: 201 });
@@ -194,15 +230,40 @@ async function saveText(payload: { title?: string; sourceUrl?: string; captureTy
 export async function PATCH(request: Request) {
   try {
     await ensureSchema();
-    const payload = await request.json() as { id?: number; status?: string; reason?: string };
+    const payload = await request.json() as { id?: number; status?: string; title?: string; content?: string; summary?: string; reason?: string; tags?: string[]; project?: string | null; kind?: string };
     if (!payload.id) return withExtensionCors(request, Response.json({ error: "id is required" }, { status: 400 }));
     const changes: Partial<typeof memoryItems.$inferInsert> = { updatedAt: new Date().toISOString() };
     if (payload.status) changes.status = payload.status;
+    if (payload.title !== undefined) {
+      if (!payload.title.trim()) return withExtensionCors(request, Response.json({ error: "标题不能为空" }, { status: 400 }));
+      changes.title = payload.title.trim().slice(0, 180);
+    }
+    if (payload.content !== undefined) {
+      changes.content = payload.content.trim();
+      changes.contentHash = await fingerprintContent(payload.content);
+    }
+    if (payload.summary !== undefined) changes.summary = payload.summary.trim().slice(0, 500);
     if (payload.reason !== undefined) changes.reason = payload.reason.trim();
+    if (payload.tags !== undefined) changes.tags = JSON.stringify(payload.tags.map(tag => tag.trim()).filter(Boolean).slice(0, 8));
+    if (payload.project !== undefined) changes.project = payload.project?.trim() || null;
+    if (payload.kind !== undefined) changes.kind = payload.kind.trim() || "笔记";
     const [row] = await getDb().update(memoryItems).set(changes).where(eq(memoryItems.id, payload.id)).returning();
     if (!row) return withExtensionCors(request, Response.json({ error: "记录不存在" }, { status: 404 }));
     return withExtensionCors(request, Response.json({ item: present(row) }));
   } catch (error) {
     return withExtensionCors(request, Response.json({ error: error instanceof Error ? error.message : "更新失败" }, { status: 500 }));
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    await ensureSchema();
+    const id = Number(new URL(request.url).searchParams.get("id"));
+    if (!Number.isInteger(id) || id <= 0) return withExtensionCors(request, Response.json({ error: "有效 id 必填" }, { status: 400 }));
+    const [row] = await getDb().delete(memoryItems).where(eq(memoryItems.id, id)).returning();
+    if (!row) return withExtensionCors(request, Response.json({ error: "记录不存在" }, { status: 404 }));
+    return withExtensionCors(request, Response.json({ deleted: true, id }));
+  } catch (error) {
+    return withExtensionCors(request, Response.json({ error: error instanceof Error ? error.message : "删除失败" }, { status: 500 }));
   }
 }

@@ -4,7 +4,7 @@ Chrome 与 Edge 共用的 Manifest V3 扩展，用于保存当前网页和选中
 
 ## 本地安装
 
-1. 解压 `TraceNest-Extension-v0.1.0.zip`。
+1. 解压 `TraceNest-Extension-v0.2.0.zip`。
 2. Chrome 打开 `chrome://extensions`；Edge 打开 `edge://extensions`。
 3. 开启“开发者模式”。
 4. 点击“加载已解压的扩展程序”，选择解压后的文件夹。
